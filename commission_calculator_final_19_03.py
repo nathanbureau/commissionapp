@@ -310,7 +310,7 @@ def build_excel_rep(rep_name, deals, rc, payout_comm, payout_accel, payout_total
 st.set_page_config(page_title="Commission Calculator", layout="wide")
 
 st.sidebar.title("Commission Calculator")
-page = st.sidebar.radio("", ["Monthly Payout", "Quarterly Review", "Data Quality"])
+page = st.sidebar.radio("", ["Dashboard", "Monthly Payout", "Quarterly Review", "Data Quality"])
 
 st.sidebar.markdown("---")
 rates = DEFAULT_RATES.copy()
@@ -450,7 +450,72 @@ try:
 
     known_reps = sorted([r for r in df['owner'].unique() if r in REP_CONFIG])
 
-    if page == "Monthly Payout":
+    if page == "Dashboard":
+        st.header("Dashboard")
+
+        ad = all_data[all_data['owner'].isin(REP_CONFIG)]
+        total_invoiced = round(ad.apply(
+            lambda r: convert_currency(r['invoice_raw'], r['deal_currency'], 'USD', rates), axis=1).sum(), 0)
+        total_collected = round(ad.apply(
+            lambda r: convert_currency(r['paid_raw'], r['deal_currency'], 'USD', rates), axis=1).sum(), 0)
+        total_payout = round(ad.apply(
+            lambda r: convert_currency(r['payout_local'], r['rep_currency'], 'USD', rates), axis=1).sum(), 0)
+        total_outstanding = round(ad.apply(
+            lambda r: convert_currency(r['overdue_raw'], r['deal_currency'], 'USD', rates), axis=1).sum(), 0)
+        coll_rate = (total_collected / total_invoiced * 100) if total_invoiced > 0 else 0
+
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Invoiced", f"${total_invoiced:,.0f}")
+        m2.metric("Collected", f"${total_collected:,.0f}")
+        m3.metric("Total Payout", f"${total_payout:,.0f}")
+        m4.metric("Outstanding", f"${total_outstanding:,.0f}")
+
+        st.progress(min(coll_rate / 100, 1.0))
+        st.caption(f"Collection Rate: {coll_rate:.1f}% (all figures USD)")
+
+        c1, c2 = st.columns(2)
+        with c1:
+            reg_rev = ad.groupby('region_group').apply(
+                lambda g: round(g.apply(
+                    lambda r: convert_currency(r['paid_raw'], r['deal_currency'], 'USD', rates), axis=1).sum(), 0)
+            ).reset_index()
+            reg_rev.columns = ['Region', 'Revenue']
+            reg_rev = reg_rev.sort_values('Revenue', ascending=True)
+            fig_r = px.bar(reg_rev, x='Revenue', y='Region', orientation='h', title="Revenue by Region (USD)")
+            fig_r.update_layout(height=350, margin=dict(l=10, r=10, t=40, b=10), showlegend=False)
+            fig_r.update_traces(marker_color='#2E86C1')
+            st.plotly_chart(fig_r, use_container_width=True)
+        with c2:
+            ch_rev = ad.groupby('channel').apply(
+                lambda g: round(g.apply(
+                    lambda r: convert_currency(r['paid_raw'], r['deal_currency'], 'USD', rates), axis=1).sum(), 0)
+            ).reset_index()
+            ch_rev.columns = ['Channel', 'Revenue']
+            fig_c = px.pie(ch_rev, values='Revenue', names='Channel', title="Revenue by Channel", hole=0.4)
+            fig_c.update_layout(height=350, margin=dict(l=10, r=10, t=40, b=10))
+            st.plotly_chart(fig_c, use_container_width=True)
+
+        st.markdown("##### Top Reps by Payout")
+        rep_pay = ad.groupby('owner').apply(
+            lambda g: pd.Series({
+                'Region': g['region_group'].iloc[0],
+                'Currency': g['rep_currency'].iloc[0],
+                'Payout (Local)': fmt(g['payout_local'].sum(), g['rep_currency'].iloc[0]),
+                'Payout (USD)': round(g.apply(
+                    lambda r: convert_currency(r['payout_local'], r['rep_currency'], 'USD', rates), axis=1).sum(), 2),
+                'Deals': len(g),
+                'Missing Booth': int(g['booth_missing'].sum()),
+            })
+        ).reset_index().rename(columns={'owner': 'Rep'})
+        rep_pay = rep_pay.sort_values('Payout (USD)', ascending=False).head(20)
+        fig_p = px.bar(rep_pay, x='Rep', y='Payout (USD)', title="Payout by Rep (USD)", color='Region')
+        fig_p.update_layout(height=400, margin=dict(l=10, r=10, t=40, b=10), xaxis_tickangle=-45)
+        st.plotly_chart(fig_p, use_container_width=True)
+
+        rep_pay['Payout (USD)'] = rep_pay['Payout (USD)'].apply(lambda v: f"${v:,.2f}")
+        st.dataframe(rep_pay, use_container_width=True, hide_index=True)
+
+    elif page == "Monthly Payout":
         st.header(f"Payout - {period_label}")
 
         if len(no_pay_date) > 0:
