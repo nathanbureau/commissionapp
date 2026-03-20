@@ -435,9 +435,17 @@ try:
     st.sidebar.subheader("Payment Period")
     pay_months = sorted([m for m in df['payment_month'].unique() if m != "unknown"], reverse=True)
     pay_quarters = sorted([q for q in df['payment_quarter'].unique() if q != "unknown"], reverse=True)
-    period_type = st.sidebar.radio("Filter By", ["All Dates", "Month", "Quarter"], key="pt")
+    period_type = st.sidebar.radio("Filter By", ["All Dates", "Date Range", "Month", "Quarter"], key="pt")
     period_label = "All Dates"
-    if period_type == "Month" and pay_months:
+    if period_type == "Date Range":
+        pay_dates = df[df['payment_date'].notna()]['payment_date']
+        if len(pay_dates) > 0:
+            dr_from = st.sidebar.date_input("From", value=pay_dates.min().date(), key="dr_from")
+            dr_to = st.sidebar.date_input("To", value=pay_dates.max().date(), key="dr_to")
+            df = df[(df['payment_date'] >= pd.Timestamp(dr_from)) &
+                    (df['payment_date'] <= pd.Timestamp(dr_to) + pd.Timedelta(days=1))]
+            period_label = f"{dr_from} to {dr_to}"
+    elif period_type == "Month" and pay_months:
         sel_m = st.sidebar.selectbox("Month", pay_months, key="sm")
         df = df[df['payment_month'] == sel_m]
         period_label = sel_m
@@ -451,9 +459,9 @@ try:
     known_reps = sorted([r for r in df['owner'].unique() if r in REP_CONFIG])
 
     if page == "Dashboard":
-        st.header("Dashboard")
+        st.header(f"Dashboard - {period_label}")
 
-        ad = all_data[all_data['owner'].isin(REP_CONFIG)]
+        ad = df[df['owner'].isin(REP_CONFIG)]
         total_invoiced = round(ad.apply(
             lambda r: convert_currency(r['invoice_raw'], r['deal_currency'], 'USD', rates), axis=1).sum(), 0)
         total_collected = round(ad.apply(
