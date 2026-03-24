@@ -310,7 +310,7 @@ def build_excel_rep(rep_name, deals, rc, payout_comm, payout_accel, payout_total
 st.set_page_config(page_title="Commission Calculator", layout="wide")
 
 st.sidebar.title("Commission Calculator")
-page = st.sidebar.radio("", ["Dashboard", "Monthly Payout", "Quarterly Review", "Data Quality"])
+page = st.sidebar.radio("", ["Dashboard", "Monthly Payout", "Payout History", "Quarterly Review", "Data Quality"])
 
 st.sidebar.markdown("---")
 rates = DEFAULT_RATES.copy()
@@ -611,6 +611,80 @@ try:
             st.download_button(f"Download {sel_rep} Report", data=buf.getvalue(),
                                file_name=f"{sel_rep.replace(' ', '_').lower()}_{period_label}.xlsx",
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+    elif page == "Payout History":
+        st.header("Payout History")
+        st.caption("All periods - not affected by payment period filter.")
+
+        hist = all_data[all_data['owner'].isin(REP_CONFIG) & (all_data['payment_date'].notna())].copy()
+
+        if len(hist) == 0:
+            st.info("No deals with payment dates in the data.")
+        else:
+            regions = sorted(hist['region_group'].unique())
+            sel_reg = st.selectbox("Region", ["All"] + regions)
+            if sel_reg != "All":
+                hist = hist[hist['region_group'] == sel_reg]
+
+            all_months = sorted(hist['payment_month'].unique())
+            all_quarters = sorted(hist['payment_quarter'].unique())
+            reps = sorted(hist['owner'].unique())
+
+            st.markdown("##### Monthly Commission")
+            m_rows = []
+            for rep in reps:
+                cur = REP_CONFIG[rep]['currency']
+                row = {'Rep': rep, 'Currency': cur}
+                rep_total = 0
+                for m in all_months:
+                    val = hist[(hist['owner'] == rep) & (hist['payment_month'] == m)]['comm_local'].sum()
+                    row[m] = fmt(val, cur) if val != 0 else '-'
+                    rep_total += val
+                row['Total'] = fmt(rep_total, cur)
+                m_rows.append(row)
+            st.dataframe(pd.DataFrame(m_rows), use_container_width=True, hide_index=True)
+
+            st.markdown("##### Monthly Accelerator")
+            a_rows = []
+            for rep in reps:
+                cur = REP_CONFIG[rep]['currency']
+                row = {'Rep': rep, 'Currency': cur}
+                rep_total = 0
+                for m in all_months:
+                    val = hist[(hist['owner'] == rep) & (hist['payment_month'] == m)]['accel_local'].sum()
+                    row[m] = fmt(val, cur) if val != 0 else '-'
+                    rep_total += val
+                row['Total'] = fmt(rep_total, cur)
+                a_rows.append(row)
+            st.dataframe(pd.DataFrame(a_rows), use_container_width=True, hide_index=True)
+
+            st.markdown("##### Monthly Total Payout")
+            p_rows = []
+            for rep in reps:
+                cur = REP_CONFIG[rep]['currency']
+                row = {'Rep': rep, 'Currency': cur}
+                rep_total = 0
+                for m in all_months:
+                    val = hist[(hist['owner'] == rep) & (hist['payment_month'] == m)]['payout_local'].sum()
+                    row[m] = fmt(val, cur) if val != 0 else '-'
+                    rep_total += val
+                row['Total'] = fmt(rep_total, cur)
+                p_rows.append(row)
+            st.dataframe(pd.DataFrame(p_rows), use_container_width=True, hide_index=True)
+
+            st.markdown("##### Quarterly Total Payout")
+            q_rows = []
+            for rep in reps:
+                cur = REP_CONFIG[rep]['currency']
+                row = {'Rep': rep, 'Currency': cur}
+                rep_total = 0
+                for q in all_quarters:
+                    val = hist[(hist['owner'] == rep) & (hist['payment_quarter'] == q)]['payout_local'].sum()
+                    row[q] = fmt(val, cur) if val != 0 else '-'
+                    rep_total += val
+                row['Total'] = fmt(rep_total, cur)
+                q_rows.append(row)
+            st.dataframe(pd.DataFrame(q_rows), use_container_width=True, hide_index=True)
 
     elif page == "Quarterly Review":
         st.header("Quarterly Review - Attainment and Accelerator Tiers")
