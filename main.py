@@ -323,7 +323,7 @@ def _quarter(d):
 
 def import_hubspot(file):
     df = pd.read_csv(file, dtype=str, encoding='utf-8-sig')
-    df = df.replace({'(No value)': None, '': None})
+    df = df.replace({'(No value)': None, '': None, 'nan': None, 'NaT': None, 'None': None})
     df.columns = df.columns.str.strip()
 
     id_col      = _find_col(df, ['record id', 'deal id'])
@@ -356,13 +356,15 @@ def import_hubspot(file):
             owner   = clean_owner(row[owner_col]) if owner_col else None
             ccy     = str(row[ccy_col]).strip() if ccy_col and row[ccy_col] else 'USD'
             close_r = row[close_col] if close_col else None
-            cdate   = None
-            cq      = None
-            try:
-                cdate = pd.to_datetime(close_r).date() if close_r else None
-                cq    = _quarter(close_r) if close_r else None
-            except Exception:
-                pass
+            cdate, cq = None, None
+            if close_r and str(close_r).strip().lower() not in ('nat', 'nan', 'none', '(no value)', ''):
+                try:
+                    dt = pd.to_datetime(close_r)
+                    if not pd.isna(dt):
+                        cdate = dt.date()
+                        cq    = _quarter(close_r)
+                except Exception:
+                    pass
 
             channel = detect_channel(row[ch_col]) if ch_col else 'inbound'
             booth   = _cfloat(row[booth_col]) if booth_col else None
