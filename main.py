@@ -377,9 +377,10 @@ def import_hubspot(file):
             inums   = str(row[inum_col]).strip() if inum_col and row[inum_col] else None
 
             pdate = None
-            if pdate_col and row[pdate_col]:
+            if pdate_col and row[pdate_col] and str(row[pdate_col]).strip().lower() not in ('nat', 'nan', 'none', '(no value)', ''):
                 try:
-                    pdate = pd.to_datetime(row[pdate_col]).date()
+                    dt = pd.to_datetime(row[pdate_col])
+                    pdate = None if pd.isna(dt) else dt.date()
                 except Exception:
                     pass
 
