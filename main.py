@@ -239,6 +239,11 @@ _SCHEMA = [
         id serial primary key, ts timestamp default now(), source text, file_name text,
         records_imported int, records_matched int, records_flagged int, notes text
     )''',
+    '''create table if not exists payouts (
+        id serial primary key, rep_name text not null, period_from date not null,
+        period_to date not null, amount numeric not null, currency text not null,
+        notes text, created_at timestamp default now()
+    )''',
 ]
 
 @st.cache_resource
@@ -1362,6 +1367,89 @@ def page_data_quality():
         st.dataframe(df4, hide_index=True, use_container_width=True)
 
 
+
+# ---- payouts ----
+
+def page_payouts():
+    st.title('Payouts')
+    st.caption('Log what was actually sent to each rep. Builds a permanent history.')
+
+    rep_names = sorted(REPS.keys())
+
+    st.subheader('Log a Payout')
+    with st.form('payout_form'):
+        rep      = st.selectbox('Rep', rep_names)
+        ccy      = REPS[rep]['currency']
+        sym      = CCY_SYM.get(ccy, '$')
+        col1, col2 = st.columns(2)
+        d_from   = col1.date_input('Period From', value=date.today().replace(day=1))
+        d_to     = col2.date_input('Period To',   value=date.today())
+        amount   = st.number_input(f'Amount ({ccy})', min_value=0.0, step=0.01, format='%.2f')
+        notes    = st.text_input('Notes (optional)')
+        submitted = st.form_submit_button('Save Payout')
+
+    if submitted:
+        if amount <= 0:
+            st.error('Amount must be greater than zero.')
+        else:
+            with _engine().connect() as conn:
+                conn.execute(text(
+                    'insert into payouts (rep_name, period_from, period_to, amount, currency, notes) '
+                    'values (:rep, :pf, :pt, :amt, :ccy, :notes)'
+                ), {'rep': rep, 'pf': str(d_from), 'pt': str(d_to), 'amt': amount, 'ccy': ccy, 'notes': notes or None})
+                conn.commit()
+            st.success(f'Saved: {rep} -- {sym}{amount:,.2f} for {d_from} to {d_to}.')
+
+    st.divider()
+    st.subheader('Payout History')
+
+    region_filter = st.selectbox('Filter by Region', ['All'] + sorted(set(r['region'] for r in REPS.values())), key='po_region')
+
+    df = db_read('''
+        select p.id, p.rep_name, r.region, r.level, p.currency,
+               p.period_from, p.period_to, p.amount, p.notes, p.created_at
+        from payouts p join reps r on r.name=p.rep_name
+        order by p.period_from desc, r.region, p.rep_name
+    ''')
+
+    if df.empty:
+        st.info('No payouts logged yet.')
+        return
+
+    if region_filter != 'All':
+        df = df[df['region'] == region_filter]
+
+    # compare against calculated payout for same period per rep
+    calc = db_read('''
+        select d.owner as rep_name, cl.period,
+               sum(cl.payout) as calculated
+        from commission_lines cl join deals d on d.id=cl.deal_id
+        group by d.owner, cl.period
+    ''')
+
+    # format for display
+    disp = df.copy()
+    disp['amount'] = disp.apply(lambda r: f'{CCY_SYM.get(r["currency"],"$")}{r["amount"]:,.2f}', axis=1)
+    disp['created_at'] = disp['created_at'].astype(str).str[:16]
+    disp = disp.drop(columns=['id'])
+    disp.columns = ['Rep', 'Region', 'Level', 'Currency', 'From', 'To', 'Amount Paid', 'Notes', 'Logged At']
+    st.dataframe(disp, hide_index=True, use_container_width=True)
+
+    # delete a row
+    st.divider()
+    st.subheader('Delete a Payout Entry')
+    ids = db_read('select id, rep_name, period_from, amount, currency from payouts order by period_from desc')
+    if not ids.empty:
+        options = {f"#{r.id} -- {r.rep_name} -- {r.period_from} -- {CCY_SYM.get(r.currency,'$')}{r.amount:,.2f}": r.id
+                   for r in ids.itertuples()}
+        chosen = st.selectbox('Select entry to delete', list(options.keys()), key='del_payout')
+        if st.button('Delete', type='secondary'):
+            with _engine().connect() as conn:
+                conn.execute(text('delete from payouts where id=:i'), {'i': options[chosen]})
+                conn.commit()
+            st.success('Deleted.')
+            st.rerun()
+
 # ================================================================
 # section 7: main app
 # ================================================================
@@ -1380,7 +1468,7 @@ with st.sidebar:
     st.caption('Commission Calculator')
     st.divider()
 
-    page = st.radio('', ['Dashboard','Monthly Payout','Payout History','Quarterly Review','Data Quality','Import'],
+    page = st.radio('', ['Dashboard','Monthly Payout','Payout History','Quarterly Review','Data Quality','Payouts','Import'],
                     label_visibility='collapsed')
 
     st.divider()
@@ -1424,4 +1512,5 @@ match page:
     case 'Payout History':   page_payout_history()
     case 'Quarterly Review': page_quarterly_review()
     case 'Data Quality':     page_data_quality()
+    case 'Payouts':          page_payouts()
     case 'Import':           page_import()
