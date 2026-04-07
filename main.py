@@ -1,7 +1,3 @@
-# ================================================================
-# bureau booths commission calculator  |  app.py
-# ================================================================
-
 import re, io, zipfile, random, time
 from datetime import date, timedelta
 
@@ -495,13 +491,23 @@ def _parse_qb_customers(file):
                 inv_num = next((v for v in vals if re.match(r'^\d{3,}$', v)), '')
             amount = _qb_float(vals[credit_c]) or _qb_float(vals[debit_c])
             if inv_num:
-                customers[current]['invoices'].append({'date': date_v, 'inv': inv_num, 'amount': amount})
+                inv_date_parsed = None
+                try:
+                    inv_date_parsed = pd.to_datetime(date_v, dayfirst=True).date()
+                except Exception:
+                    pass
+                customers[current]['invoices'].append({'date': inv_date_parsed, 'inv': inv_num, 'amount': amount})
 
         elif type_v.lower() == 'payment':
             amount = _qb_float(vals[credit_c])
             if amount == 0:
                 amount = abs(_qb_float(vals[debit_c]))
-            customers[current]['payments'].append({'date': date_v, 'amount': amount})
+            pay_date_parsed = None
+            try:
+                pay_date_parsed = pd.to_datetime(date_v, dayfirst=True).date()
+            except Exception:
+                pass
+            customers[current]['payments'].append({'date': pay_date_parsed, 'amount': amount})
 
     return customers
 
@@ -613,7 +619,16 @@ def _xdate(val):
         return None
 
 def import_xero(file, source):
-    raw = pd.read_csv(file, header=None, dtype=str, encoding='utf-8-sig').fillna('')
+    fname = getattr(file, 'name', '')
+    if fname.endswith('.xlsx') or fname.endswith('.xls'):
+        import openpyxl
+        wb  = openpyxl.load_workbook(file, read_only=True, data_only=True)
+        ws  = wb.active
+        rows = [[str(c) if c is not None else '' for c in row] for row in ws.iter_rows(values_only=True)]
+        wb.close()
+        raw = pd.DataFrame(rows).fillna('')
+    else:
+        raw = pd.read_csv(file, header=None, dtype=str, encoding='utf-8-sig').fillna('')
     if len(raw) < 6:
         raise ValueError(f'Xero file too short: {source}')
 
