@@ -1385,6 +1385,108 @@ def page_data_quality():
 
 # ---- payouts ----
 
+def page_match():
+    st.title('Match Payments to Deals')
+    st.caption('Invoices that have received payments but are not linked to a deal. Link them here -- the next Calculate will pick them up.')
+
+    df = db_read('''
+        select
+            i.id as invoice_id,
+            i.invoice_number,
+            i.customer_name,
+            i.source,
+            i.invoice_date,
+            i.gross_amount,
+            sum(p.amount) as total_paid,
+            max(p.payment_date) as last_payment_date,
+            count(p.id) as payment_count
+        from invoices i
+        join payments p on p.invoice_id = i.id
+        where i.deal_id is null
+          and p.match_confidence != 'flagged'
+        group by i.id, i.invoice_number, i.customer_name, i.source, i.invoice_date, i.gross_amount
+        order by last_payment_date desc
+    ''')
+
+    if df.empty:
+        st.success('All paid invoices are linked to deals.')
+        return
+
+    st.info(f'{len(df)} paid invoices not yet linked to a deal.')
+
+    st.divider()
+
+    col_l, col_r = st.columns([1, 1])
+
+    with col_l:
+        st.subheader('Select Invoice')
+        inv_options = {
+            f"{r.invoice_number} -- {r.customer_name} ({r.source}) -- {CCY_SYM.get('USD','$')}{r.gross_amount:,.2f}": r.invoice_id
+            for r in df.itertuples()
+        }
+        chosen_inv_label = st.selectbox('Invoice', list(inv_options.keys()), label_visibility='collapsed')
+        chosen_inv_id = inv_options[chosen_inv_label]
+
+        chosen_row = df[df['invoice_id'] == chosen_inv_id].iloc[0]
+        st.markdown(f"**Customer:** {chosen_row['customer_name']}")
+        st.markdown(f"**Invoice Date:** {chosen_row['invoice_date']}")
+        st.markdown(f"**Gross Amount:** {chosen_row['gross_amount']:,.2f}")
+        st.markdown(f"**Total Paid:** {chosen_row['total_paid']:,.2f}")
+        st.markdown(f"**Last Payment:** {chosen_row['last_payment_date']}")
+        st.markdown(f"**Source:** {chosen_row['source']}")
+
+    with col_r:
+        st.subheader('Find Deal')
+        search = st.text_input('Search deal name or owner', key='match_search')
+
+        if search and len(search) >= 2:
+            deals = db_read(
+                "select id, deal_name, owner, deal_currency, close_date, close_quarter, invoice_total "
+                "from deals where deal_name ilike :q or owner ilike :q order by close_date desc limit 50",
+                {'q': f'%{search}%'}
+            )
+            if deals.empty:
+                st.warning('No deals found.')
+            else:
+                deal_options = {
+                    f"{r.deal_name} -- {r.owner} -- {r.close_date}": r.id
+                    for r in deals.itertuples()
+                }
+                chosen_deal_label = st.selectbox('Deal', list(deal_options.keys()), label_visibility='collapsed')
+                chosen_deal_id = deal_options[chosen_deal_label]
+
+                chosen_deal = deals[deals['id'] == chosen_deal_id].iloc[0]
+                st.markdown(f"**Owner:** {chosen_deal['owner']}")
+                st.markdown(f"**Currency:** {chosen_deal['deal_currency']}")
+                st.markdown(f"**Close Date:** {chosen_deal['close_date']}")
+                st.markdown(f"**Quarter:** {chosen_deal['close_quarter']}")
+                st.markdown(f"**Invoice Total:** {chosen_deal['invoice_total']:,.2f}" if chosen_deal['invoice_total'] else "**Invoice Total:** --")
+
+                st.divider()
+                if st.button('Link Invoice to Deal', type='primary'):
+                    with _engine().connect() as conn:
+                        conn.execute(text(
+                            'update invoices set deal_id=:did where id=:iid'
+                        ), {'did': int(chosen_deal_id), 'iid': int(chosen_inv_id)})
+                        conn.commit()
+                    st.success(f'Linked {chosen_row["invoice_number"]} to {chosen_deal["deal_name"]}.')
+                    st.rerun()
+        else:
+            st.caption('Type at least 2 characters to search.')
+
+    st.divider()
+    st.subheader('Recently Linked')
+    recent = db_read('''
+        select i.invoice_number, i.customer_name, i.source, i.gross_amount,
+               d.deal_name, d.owner, d.close_date
+        from invoices i join deals d on d.id = i.deal_id
+        where i.deal_id is not null
+        order by i.last_imported desc limit 20
+    ''')
+    if not recent.empty:
+        st.dataframe(recent, hide_index=True, use_container_width=True)
+
+
 def page_payouts():
     st.title('Payouts')
     st.caption('Log what was actually sent to each rep. Builds a permanent history.')
@@ -1483,7 +1585,7 @@ with st.sidebar:
     st.caption('Commission Calculator')
     st.divider()
 
-    page = st.radio('', ['Dashboard','Monthly Payout','Payout History','Quarterly Review','Data Quality','Payouts','Import'],
+    page = st.radio('', ['Dashboard','Monthly Payout','Payout History','Quarterly Review','Data Quality','Payouts','Match Payments','Import'],
                     label_visibility='collapsed')
 
     st.divider()
@@ -1528,4 +1630,5 @@ match page:
     case 'Quarterly Review': page_quarterly_review()
     case 'Data Quality':     page_data_quality()
     case 'Payouts':          page_payouts()
+    case 'Match Payments':   page_match()
     case 'Import':           page_import()
