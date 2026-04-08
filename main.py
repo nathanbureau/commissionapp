@@ -1489,83 +1489,147 @@ def page_match():
 
 def page_payouts():
     st.title('Payouts')
-    st.caption('Log what was actually sent to each rep. Builds a permanent history.')
+    st.caption('Shows calculated commission vs what was actually paid. Enter amounts and submit to save permanently.')
 
-    rep_names = sorted(REPS.keys())
+    region_filter = st.selectbox('Region', ['All'] + sorted(set(r['region'] for r in REPS.values())), key='po_region')
 
-    st.subheader('Log a Payout')
-    with st.form('payout_form'):
-        rep      = st.selectbox('Rep', rep_names)
-        ccy      = REPS[rep]['currency']
-        sym      = CCY_SYM.get(ccy, '$')
-        col1, col2 = st.columns(2)
-        d_from   = col1.date_input('Period From', value=date.today().replace(day=1))
-        d_to     = col2.date_input('Period To',   value=date.today())
-        amount   = st.number_input(f'Amount ({ccy})', min_value=0.0, step=0.01, format='%.2f')
-        notes    = st.text_input('Notes (optional)')
-        submitted = st.form_submit_button('Save Payout')
+    periods = db_read("select distinct period from commission_lines order by period desc")
+    if periods.empty:
+        st.info('No commission data yet. Import files and run Calculate.')
+        return
 
-    if submitted:
-        if amount <= 0:
-            st.error('Amount must be greater than zero.')
-        else:
-            with _engine().connect() as conn:
-                conn.execute(text(
-                    'insert into payouts (rep_name, period_from, period_to, amount, currency, notes) '
-                    'values (:rep, :pf, :pt, :amt, :ccy, :notes)'
-                ), {'rep': rep, 'pf': str(d_from), 'pt': str(d_to), 'amt': amount, 'ccy': ccy, 'notes': notes or None})
-                conn.commit()
-            st.success(f'Saved: {rep} -- {sym}{amount:,.2f} for {d_from} to {d_to}.')
+    period_sel = st.selectbox('Period', periods['period'].tolist(), key='po_period')
 
-    st.divider()
-    st.subheader('Payout History')
+    # calculated payouts for this period
+    calc = db_read('''
+        select d.owner as rep_name, r.region, r.currency,
+               sum(cl.commission) as commission,
+               sum(cl.accelerator) as accelerator,
+               sum(cl.payout) as calculated
+        from commission_lines cl
+        join deals d on d.id = cl.deal_id
+        join reps r on r.name = d.owner
+        where cl.period = :p
+        group by d.owner, r.region, r.currency
+        order by r.region, d.owner
+    ''', {'p': period_sel})
 
-    region_filter = st.selectbox('Filter by Region', ['All'] + sorted(set(r['region'] for r in REPS.values())), key='po_region')
-
-    df = db_read('''
-        select p.id, p.rep_name, r.region, r.level, p.currency,
-               p.period_from, p.period_to, p.amount, p.notes, p.created_at
-        from payouts p join reps r on r.name=p.rep_name
-        order by p.period_from desc, r.region, p.rep_name
-    ''')
-
-    if df.empty:
-        st.info('No payouts logged yet.')
+    if calc.empty:
+        st.info('No commission lines for this period.')
         return
 
     if region_filter != 'All':
-        df = df[df['region'] == region_filter]
+        calc = calc[calc['region'] == region_filter]
 
-    # compare against calculated payout for same period per rep
-    calc = db_read('''
-        select d.owner as rep_name, cl.period,
-               sum(cl.payout) as calculated
-        from commission_lines cl join deals d on d.id=cl.deal_id
-        group by d.owner, cl.period
-    ''')
+    # existing logged payouts for this period
+    existing = db_read(
+        "select rep_name, sum(amount) as paid from payouts "
+        "where period_from <= :p and period_to >= :p "
+        "group by rep_name",
+        {'p': f'{period_sel}-01'}
+    )
+    paid_map = dict(zip(existing['rep_name'], existing['paid'])) if not existing.empty else {}
 
-    # format for display
-    disp = df.copy()
-    disp['amount'] = disp.apply(lambda r: f'{CCY_SYM.get(r["currency"],"$")}{r["amount"]:,.2f}', axis=1)
-    disp['created_at'] = disp['created_at'].astype(str).str[:16]
-    disp = disp.drop(columns=['id'])
-    disp.columns = ['Rep', 'Region', 'Level', 'Currency', 'From', 'To', 'Amount Paid', 'Notes', 'Logged At']
-    st.dataframe(disp, hide_index=True, use_container_width=True)
-
-    # delete a row
     st.divider()
-    st.subheader('Delete a Payout Entry')
-    ids = db_read('select id, rep_name, period_from, amount, currency from payouts order by period_from desc')
-    if not ids.empty:
-        options = {f"#{r.id} -- {r.rep_name} -- {r.period_from} -- {CCY_SYM.get(r.currency,'$')}{r.amount:,.2f}": r.id
-                   for r in ids.itertuples()}
-        chosen = st.selectbox('Select entry to delete', list(options.keys()), key='del_payout')
-        if st.button('Delete', type='secondary'):
-            with _engine().connect() as conn:
-                conn.execute(text('delete from payouts where id=:i'), {'i': options[chosen]})
-                conn.commit()
-            st.success('Deleted.')
-            st.rerun()
+    st.subheader(f'Period: {period_sel}')
+
+    # build editable rows using session state
+    if f'payout_inputs_{period_sel}' not in st.session_state:
+        st.session_state[f'payout_inputs_{period_sel}'] = {
+            row.rep_name: paid_map.get(row.rep_name, 0.0)
+            for row in calc.itertuples()
+        }
+
+    inputs = st.session_state[f'payout_inputs_{period_sel}']
+
+    header = st.columns([2, 1, 1, 1, 1, 1, 1.5])
+    for col, label in zip(header, ['Rep', 'Region', 'Currency', 'Commission', 'Accelerator', 'Calculated', 'Actually Paid']):
+        col.markdown(f'**{label}**')
+
+    for row in calc.itertuples():
+        sym = CCY_SYM.get(row.currency, '$')
+        cols = st.columns([2, 1, 1, 1, 1, 1, 1.5])
+        cols[0].write(row.rep_name)
+        cols[1].write(row.region)
+        cols[2].write(row.currency)
+        cols[3].write(f'{sym}{float(row.commission):,.2f}')
+        cols[4].write(f'{sym}{float(row.accelerator):,.2f}')
+        cols[5].write(f'{sym}{float(row.calculated):,.2f}')
+        inputs[row.rep_name] = cols[6].number_input(
+            f'paid_{row.rep_name}',
+            value=float(inputs.get(row.rep_name, 0.0)),
+            min_value=0.0,
+            step=0.01,
+            format='%.2f',
+            label_visibility='collapsed',
+            key=f'paid_{period_sel}_{row.rep_name}',
+        )
+
+    st.divider()
+
+    # totals row
+    total_calc = float(calc['calculated'].sum())
+    total_paid = sum(inputs.values())
+    variance   = total_paid - total_calc
+    sym_default = '$'
+    tc, tp, tv = st.columns(3)
+    tc.metric('Total Calculated', f'{sym_default}{total_calc:,.2f}')
+    tp.metric('Total Actually Paid', f'{sym_default}{total_paid:,.2f}')
+    tv.metric('Variance', f'{sym_default}{variance:,.2f}', delta=f'{variance:,.2f}')
+
+    st.divider()
+    notes = st.text_input('Notes (optional)', key=f'po_notes_{period_sel}')
+
+    if st.button('Save All Payouts for This Period', type='primary'):
+        period_from = f'{period_sel}-01'
+        import calendar
+        yr, mo = int(period_sel[:4]), int(period_sel[5:7])
+        period_to = f'{period_sel}-{calendar.monthrange(yr, mo)[1]}'
+        with _engine().connect() as conn:
+            for rep_name, amount in inputs.items():
+                if amount <= 0:
+                    continue
+                rep_row = calc[calc['rep_name'] == rep_name]
+                if rep_row.empty:
+                    continue
+                ccy = rep_row.iloc[0]['currency']
+                conn.execute(text(
+                    'delete from payouts where rep_name=:rep '
+                    'and period_from=:pf and period_to=:pt'
+                ), {'rep': rep_name, 'pf': period_from, 'pt': period_to})
+                conn.execute(text(
+                    'insert into payouts (rep_name, period_from, period_to, amount, currency, notes) '
+                    'values (:rep, :pf, :pt, :amt, :ccy, :notes)'
+                ), {'rep': rep_name, 'pf': period_from, 'pt': period_to,
+                    'amt': amount, 'ccy': ccy, 'notes': notes or None})
+            conn.commit()
+        st.success(f'Saved payouts for {period_sel}.')
+        st.rerun()
+
+    st.divider()
+    st.subheader('Full Payout History')
+    hist = db_read('''
+        select p.rep_name, r.region, p.currency, p.period_from, p.period_to,
+               p.amount as paid,
+               coalesce((
+                   select sum(cl.payout)
+                   from commission_lines cl join deals d on d.id=cl.deal_id
+                   where d.owner=p.rep_name
+                     and cl.period = to_char(p.period_from, 'YYYY-MM')
+               ), 0) as calculated,
+               p.notes
+        from payouts p join reps r on r.name=p.rep_name
+        order by p.period_from desc, r.region, p.rep_name
+    ''')
+    if not hist.empty:
+        hist['variance'] = hist['paid'] - hist['calculated']
+        hist['paid']       = hist.apply(lambda r: f'{CCY_SYM.get(r["currency"],"$")}{float(r["paid"]):,.2f}', axis=1)
+        hist['calculated'] = hist.apply(lambda r: f'{CCY_SYM.get(r["currency"],"$")}{float(r["calculated"]):,.2f}', axis=1)
+        hist['variance']   = hist.apply(lambda r: f'{CCY_SYM.get(r["currency"],"$")}{float(r["variance"]):,.2f}', axis=1)
+        hist.columns = [c.replace('_', ' ').title() for c in hist.columns]
+        st.dataframe(hist, hide_index=True, use_container_width=True)
+    else:
+        st.info('No payout history yet.')
 
 # ================================================================
 # section 7: main app
