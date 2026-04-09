@@ -172,8 +172,18 @@ def _get_tiers_for(name, level, region):
 
 DEFAULT_FX  = {'USD': 1.0, 'CAD': 0.74, 'AUD': 0.65, 'GBP': 1.26, 'EUR': 1.08}
 CCY_SYM     = {'USD': '$', 'CAD': 'C$', 'AUD': 'A$', 'GBP': '£', 'EUR': '€'}
-WELCOMES    = ['Good to see you, Teya.', 'Welcome back, Teya.',
-               "Hey Teya, let's get into it.", 'Ready when you are, Teya.']
+WELCOMES = [
+    "Teya! The legend has logged in. Let's get this bread.",
+    "Welcome back, Teya. Everyone here thinks you're doing an incredible job.",
+    "Oh thank god you're here Teya, we were lost without you.",
+    "Teya in the building. Commissions fear her.",
+    "Hello gorgeous. Ready to make some reps very happy?",
+    "Teya! The spreadsheet whisperer returns. They wrote songs about you, you know.",
+    "Back again, Teya? You really do run this place.",
+    "Welcome, Teya. HR wants you to know you're their favourite.",
+    "Teya has entered the chat. Chaos has left the building.",
+    "Good to have you back. No one does this better than you, genuinely.",
+]
 
 
 # ================================================================
@@ -1040,6 +1050,57 @@ def page_dashboard():
     else:
         st.info('No commission data. Import files and run Calculate.')
 
+    st.divider()
+    st.subheader('Rep Attainment This Quarter')
+
+    current_q = f'{date.today().year} Q{(date.today().month-1)//3+1}'
+    rep_sel = st.selectbox('Select Rep', [''] + sorted(REPS.keys()), label_visibility='collapsed', key='dash_rep')
+
+    if rep_sel:
+        cfg  = REPS[rep_sel]
+        tiers = _get_tiers_for(rep_sel, cfg['level'], cfg['region'])
+        att = db_read(
+            'select total_booth_items, tier_name, tier_rate, deal_count from attainment '
+            'where rep_name=:n and close_quarter=:q',
+            {'n': rep_sel, 'q': current_q}
+        )
+        if att.empty:
+            st.info(f'No attainment data for {rep_sel} in {current_q} yet.')
+        elif not tiers:
+            st.info(f'{rep_sel} does not have an accelerator tier.')
+        else:
+            row   = att.iloc[0]
+            total = float(row['total_booth_items'] or 0)
+            sym   = CCY_SYM.get(cfg['currency'], '$')
+            max_v = tiers[-1][0] * 1.3
+            colours = ['#f0f4f8','#d0e4f7','#a8c8f0','#6fa8dc','#4285c3','#1a5fa0']
+            steps, prev = [], 0
+            for j, (th, _) in enumerate(tiers):
+                steps.append({'range': [prev, th], 'color': colours[min(j, len(colours)-1)]})
+                prev = th
+            steps.append({'range': [prev, max_v], 'color': '#0d3b75'})
+            fig = go.Figure(go.Indicator(
+                mode='gauge+number', value=total,
+                title={'text': f'{rep_sel} -- {current_q}', 'font': {'size': 14}},
+                number={'prefix': sym, 'valueformat': ',.0f'},
+                gauge={'axis': {'range': [0, max_v]}, 'bar': {'color': '#e8622a'},
+                       'steps': steps,
+                       'threshold': {'line': {'color': 'red', 'width': 2}, 'thickness': .75,
+                                     'value': tiers[2][0] if len(tiers) > 2 else total}},
+            ))
+            fig.update_layout(height=260, margin=dict(t=60,b=10,l=40,r=40))
+            st.plotly_chart(fig, use_container_width=True)
+
+            next_thresh = next((t for t, _ in tiers if t > total), None)
+            rate = float(row['tier_rate'] or 0)
+            c1, c2, c3 = st.columns(3)
+            c1.metric('Booth Items Closed', f'{sym}{total:,.0f}')
+            c2.metric('Current Tier Rate', f'{rate:.2%}')
+            if next_thresh:
+                c3.metric('To Next Tier', f'{sym}{next_thresh - total:,.0f}')
+            else:
+                c3.metric('Tier', 'Top Tier')
+
 
 # ---- monthly payout ----
 
@@ -1693,6 +1754,406 @@ def page_payouts():
             st.dataframe(qb_hist, hide_index=True, use_container_width=True)
 
 # ================================================================
+# section 6b: page sub-renderers for tab-based layout
+# ================================================================
+
+def _payouts_monthly():
+    period = st.session_state.get('period_filter')
+    pc, pp = _period_clause(period)
+    df = db_read(
+        f'select d.owner, r.region, r.currency, r.level, '
+        f'sum(cl.commission) as commission, sum(cl.accelerator) as accelerator, sum(cl.payout) as payout '
+        f'from commission_lines cl join deals d on d.id=cl.deal_id join reps r on r.name=d.owner '
+        f'where 1=1 {pc} group by d.owner,r.region,r.currency,r.level order by r.region,d.owner', pp)
+    if df.empty:
+        st.info('No commission data for the selected period.')
+        return
+    missing = _scalar('select count(*) from deals where booth_missing=true', {})
+    if missing:
+        st.warning(f'{int(missing)} deals are missing Booth Items revenue and are excluded.')
+    regions = df['region'].unique().tolist()
+    tabs = st.tabs(regions + ['All'])
+    for i, region in enumerate(regions):
+        with tabs[i]:
+            sub = df[df['region'] == region].copy()
+            sym = CCY_SYM.get(sub.iloc[0]['currency'], '$')
+            disp = sub[['owner','level','currency','commission','accelerator','payout']].copy()
+            disp.columns = ['Rep','Level','Currency','Commission','Accelerator','Total Payout']
+            for c in ['Commission','Accelerator','Total Payout']:
+                disp[c] = disp[c].apply(lambda x: f'{sym}{x:,.2f}')
+            total_row = pd.DataFrame([{'Rep':'TOTAL','Level':'','Currency':'','Commission':'','Accelerator':'','Total Payout':f'{sym}{sub["payout"].sum():,.2f}'}])
+            st.dataframe(pd.concat([disp, total_row], ignore_index=True), hide_index=True, use_container_width=True)
+    with tabs[-1]:
+        st.dataframe(df[['owner','region','level','currency','commission','accelerator','payout']], hide_index=True, use_container_width=True)
+
+
+def _payouts_drilldown():
+    period = st.session_state.get('period_filter')
+    pc, pp = _period_clause(period)
+    all_reps = sorted(REPS.keys())
+    selected = st.selectbox('Select Rep', all_reps)
+    if not selected:
+        return
+    lines = db_read(
+        f'select cl.payment_date, cl.period, cl.close_quarter, d.deal_name, d.sales_channel, '
+        f'cl.cash_landed, cl.booth_payable, cl.comm_rate, cl.commission, '
+        f'cl.accel_rate, cl.accelerator, cl.payout '
+        f'from commission_lines cl join deals d on d.id=cl.deal_id '
+        f'where d.owner=:rep {pc} order by cl.payment_date desc',
+        {'rep': selected, **pp})
+    if lines.empty:
+        st.info('No lines for this rep in the selected period.')
+        return
+    ccy = REPS.get(selected, {}).get('currency', 'USD')
+    sym = CCY_SYM.get(ccy, '$')
+    disp = lines.copy()
+    for c in ['cash_landed','booth_payable','commission','accelerator','payout']:
+        disp[c] = disp[c].apply(lambda x: f'{sym}{x:,.2f}')
+    for c in ['comm_rate','accel_rate']:
+        disp[c] = disp[c].apply(lambda x: f'{float(x):.2%}')
+    st.dataframe(disp, hide_index=True, use_container_width=True)
+    xl = _build_excel(selected, lines, ccy)
+    st.download_button(f'Download {selected} Excel', data=xl,
+        file_name=f'{selected.replace(" ","_")}_commission.xlsx',
+        mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+    if st.button('Download All Reps (ZIP)'):
+        period2 = st.session_state.get('period_filter')
+        pc2, pp2 = _period_clause(period2)
+        df2 = db_read(f'select d.owner, r.currency from commission_lines cl join deals d on d.id=cl.deal_id join reps r on r.name=d.owner where 1=1 {pc2} group by d.owner,r.currency', pp2)
+        zb = _build_zip(df2, pp2, pc2)
+        st.download_button('Save ZIP', data=zb, file_name='all_reps_commission.zip', mime='application/zip')
+
+
+def _payouts_log():
+    st.caption('Select a period, enter what was actually paid to each rep, and save.')
+    periods = db_read("select distinct period from commission_lines where period >= '2025-01' order by period desc")
+    if periods.empty:
+        st.info('No commission data yet.')
+        return
+    period_sel = st.selectbox('Period', periods['period'].tolist(), key='log_period')
+    region_filter = st.selectbox('Region', ['All'] + sorted(set(r['region'] for r in REPS.values())), key='log_region')
+
+    calc = db_read('''
+        select d.owner as rep_name, r.region, r.currency,
+               sum(cl.commission) as commission, sum(cl.accelerator) as accelerator, sum(cl.payout) as calculated
+        from commission_lines cl join deals d on d.id=cl.deal_id join reps r on r.name=d.owner
+        where cl.period=:p group by d.owner,r.region,r.currency order by r.region,d.owner
+    ''', {'p': period_sel})
+
+    if calc.empty:
+        st.info('No commission lines for this period.')
+        return
+    if region_filter != 'All':
+        calc = calc[calc['region'] == region_filter]
+
+    existing = db_read("select rep_name, sum(amount) as paid from payouts where period_from<=:p and period_to>=:p group by rep_name", {'p': f'{period_sel}-01'})
+    paid_map = dict(zip(existing['rep_name'], existing['paid'])) if not existing.empty else {}
+
+    if f'payout_inputs_{period_sel}' not in st.session_state:
+        st.session_state[f'payout_inputs_{period_sel}'] = {row.rep_name: paid_map.get(row.rep_name, 0.0) for row in calc.itertuples()}
+    inputs = st.session_state[f'payout_inputs_{period_sel}']
+
+    header = st.columns([2,1,1,1,1,1.5])
+    for col, label in zip(header, ['Rep','Region','Currency','Commission','Accelerator','Actually Paid']):
+        col.markdown(f'**{label}**')
+    for row in calc.itertuples():
+        sym = CCY_SYM.get(row.currency, '$')
+        cols = st.columns([2,1,1,1,1,1.5])
+        cols[0].write(row.rep_name)
+        cols[1].write(row.region)
+        cols[2].write(row.currency)
+        cols[3].write(f'{sym}{float(row.commission):,.2f}')
+        cols[4].write(f'{sym}{float(row.accelerator):,.2f}')
+        inputs[row.rep_name] = cols[5].number_input(
+            f'paid_{row.rep_name}', value=float(inputs.get(row.rep_name, 0.0)),
+            min_value=0.0, step=0.01, format='%.2f',
+            label_visibility='collapsed', key=f'paid_{period_sel}_{row.rep_name}')
+
+    st.divider()
+    total_calc = float(calc['calculated'].sum())
+    total_paid = sum(inputs.values())
+    variance = total_paid - total_calc
+    c1, c2, c3 = st.columns(3)
+    c1.metric('Total Calculated', f'${total_calc:,.2f}')
+    c2.metric('Total Actually Paid', f'${total_paid:,.2f}')
+    c3.metric('Variance', f'${variance:,.2f}')
+
+    notes = st.text_input('Notes (optional)', key=f'log_notes_{period_sel}')
+    if st.button('Save Payouts for This Period', type='primary'):
+        import calendar
+        yr, mo = int(period_sel[:4]), int(period_sel[5:7])
+        pf = f'{period_sel}-01'
+        pt = f'{period_sel}-{calendar.monthrange(yr,mo)[1]}'
+        with _engine().connect() as conn:
+            for rep_name, amount in inputs.items():
+                if amount <= 0:
+                    continue
+                rep_row = calc[calc['rep_name']==rep_name]
+                if rep_row.empty:
+                    continue
+                ccy = rep_row.iloc[0]['currency']
+                conn.execute(text('delete from payouts where rep_name=:rep and period_from=:pf and period_to=:pt'), {'rep':rep_name,'pf':pf,'pt':pt})
+                conn.execute(text('insert into payouts (rep_name,period_from,period_to,amount,currency,notes) values (:rep,:pf,:pt,:amt,:ccy,:notes)'), {'rep':rep_name,'pf':pf,'pt':pt,'amt':amount,'ccy':ccy,'notes':notes or None})
+            conn.commit()
+        st.success(f'Saved payouts for {period_sel}.')
+        st.rerun()
+
+    st.divider()
+    st.subheader('Quarterly Bonus')
+    st.caption('Record a lump-sum quarterly bonus payment made separately from monthly commission. The accelerator accrues deal-by-deal as cash lands, but if you pay it out at quarter end as a separate payment, log it here.')
+    qs_list = db_read("select distinct close_quarter from attainment where close_quarter is not null order by close_quarter desc")
+    if not qs_list.empty:
+        qb_rep  = st.selectbox('Rep', sorted(REPS.keys()), key='qb_rep2')
+        qb_q    = st.selectbox('Quarter', qs_list['close_quarter'].tolist(), key='qb_q2')
+        qb_date = st.date_input('Date Paid', value=date.today(), key='qb_date2')
+        qb_amt  = st.number_input(f'Amount ({REPS[qb_rep]["currency"]})', min_value=0.0, step=0.01, format='%.2f', key='qb_amt2')
+        qb_note = st.text_input('Notes', key='qb_note2')
+        if st.button('Save Quarterly Bonus', key='qb_save2'):
+            if qb_amt <= 0:
+                st.error('Amount must be greater than zero.')
+            else:
+                with _engine().connect() as conn:
+                    conn.execute(text('insert into payouts (rep_name,period_from,period_to,amount,currency,notes) values (:rep,:pf,:pt,:amt,:ccy,:notes)'),
+                        {'rep':qb_rep,'pf':str(qb_date),'pt':str(qb_date),'amt':qb_amt,'ccy':REPS[qb_rep]['currency'],'notes':f'Q bonus {qb_q}' + (f' -- {qb_note}' if qb_note else '')})
+                    conn.commit()
+                st.success(f'Saved quarterly bonus for {qb_rep} -- {qb_q}.')
+                st.rerun()
+
+
+def _payouts_history():
+    region_filter = st.selectbox('Region', ['All'] + sorted(set(r['region'] for r in REPS.values())), key='hist_region2')
+    df = db_read('''
+        select d.owner, r.region, r.currency, cl.period, cl.close_quarter,
+               cl.commission, cl.accelerator, cl.payout
+        from commission_lines cl join deals d on d.id=cl.deal_id join reps r on r.name=d.owner
+        where cl.period >= '2025-01' order by cl.period
+    ''')
+    if df.empty:
+        st.info('No history yet.')
+        return
+    if region_filter != 'All':
+        df = df[df['region'] == region_filter]
+
+    for label, col in [('Monthly Commission','commission'),('Monthly Accelerator','accelerator'),('Monthly Total Payout','payout')]:
+        st.subheader(label)
+        _history_grid(df, 'period', col)
+    st.subheader('Quarterly Total Payout')
+    _history_grid(df, 'close_quarter', 'payout')
+
+    st.divider()
+    st.subheader('Actual Payouts vs Calculated')
+    hist = db_read('''
+        select p.rep_name, r.region, p.currency, p.period_from, p.period_to, p.amount as paid,
+               coalesce((select sum(cl.payout) from commission_lines cl join deals d on d.id=cl.deal_id
+                         where d.owner=p.rep_name and cl.period=to_char(p.period_from,'YYYY-MM')),0) as calculated,
+               p.notes
+        from payouts p join reps r on r.name=p.rep_name
+        order by p.period_from desc, r.region, p.rep_name
+    ''')
+    if not hist.empty:
+        hist['variance'] = hist['paid'] - hist['calculated']
+        for c in ['paid','calculated','variance']:
+            hist[c] = hist.apply(lambda r: f'{CCY_SYM.get(r["currency"],"$")}{float(r[c]):,.2f}', axis=1)
+        hist.columns = [c.replace('_',' ').title() for c in hist.columns]
+        st.dataframe(hist, hide_index=True, use_container_width=True)
+
+
+def _admin_import():
+    st.subheader('Import Files')
+    st.caption('Upload source files then click Calculate. Every import is safe to re-run.')
+
+    st.markdown('**HubSpot Deals**')
+    _import_status('hubspot')
+    f = st.file_uploader('HubSpot CSV', type='csv', key='hs2')
+    if f and st.button('Import HubSpot', key='hs_btn2'):
+        with st.spinner('Importing...'):
+            try:
+                n, _ = import_hubspot(f)
+                m = match_invoices_to_deals()
+                st.success(f'{n} deals upserted, {m} invoices matched.')
+            except Exception as e:
+                st.error(str(e))
+
+    st.divider()
+    col_us, col_ca = st.columns(2)
+    with col_us:
+        st.markdown('**QuickBooks US**')
+        _import_status('QB_US')
+        f = st.file_uploader('QB US CSV', type='csv', key='qb_us2')
+        if f and st.button('Import QB US', key='qb_us_btn2'):
+            with st.spinner('Importing...'):
+                try:
+                    n, l, fl = import_qb(f, 'QB_US')
+                    match_invoices_to_deals()
+                    st.success(f'{n} invoices, {l} payments, {len(fl)} flagged.')
+                except Exception as e:
+                    st.error(str(e))
+    with col_ca:
+        st.markdown('**QuickBooks Canada**')
+        _import_status('QB_CA')
+        f = st.file_uploader('QB Canada CSV', type='csv', key='qb_ca2')
+        if f and st.button('Import QB Canada', key='qb_ca_btn2'):
+            with st.spinner('Importing...'):
+                try:
+                    n, l, fl = import_qb(f, 'QB_CA')
+                    match_invoices_to_deals()
+                    st.success(f'{n} invoices, {l} payments, {len(fl)} flagged.')
+                except Exception as e:
+                    st.error(str(e))
+
+    st.divider()
+    col_uk, col_au = st.columns(2)
+    with col_uk:
+        st.markdown('**Xero UK**')
+        _import_status('XERO_UK')
+        f = st.file_uploader('Xero UK', type=['csv','xlsx'], key='xero_uk2')
+        if f and st.button('Import Xero UK', key='xero_uk_btn2'):
+            with st.spinner('Importing...'):
+                try:
+                    n, l = import_xero(f, 'XERO_UK')
+                    match_invoices_to_deals()
+                    st.success(f'{n} invoices, {l} payments.')
+                except Exception as e:
+                    st.error(str(e))
+    with col_au:
+        st.markdown('**Xero AUS**')
+        _import_status('XERO_AU')
+        f = st.file_uploader('Xero AUS', type=['csv','xlsx'], key='xero_au2')
+        if f and st.button('Import Xero AUS', key='xero_au_btn2'):
+            with st.spinner('Importing...'):
+                try:
+                    n, l = import_xero(f, 'XERO_AU')
+                    match_invoices_to_deals()
+                    st.success(f'{n} invoices, {l} payments.')
+                except Exception as e:
+                    st.error(str(e))
+
+    st.divider()
+    st.subheader('Calculate Commission')
+    st.caption('Run after every import. Recalculates everything from scratch.')
+    if st.button('Calculate Commission', type='primary', key='calc2'):
+        with st.spinner('Calculating...'):
+            try:
+                np, nh = calculate_all()
+                st.success(f'Done -- {np} lines from payments, {nh} from HubSpot fallback.')
+            except Exception as e:
+                st.error(str(e))
+
+    st.divider()
+    st.subheader('Import Log')
+    log = db_read('select ts, source, file_name, records_imported, records_matched, records_flagged from import_log order by ts desc limit 30')
+    if not log.empty:
+        st.dataframe(log, hide_index=True, use_container_width=True)
+
+
+def _admin_match():
+    st.caption('Paid invoices with no deal attached. Select one, set a date paid, search for the deal and link it.')
+    df = db_read('''
+        select i.id as invoice_id, i.invoice_number, i.customer_name, i.source,
+               i.invoice_date, i.gross_amount, sum(p.amount) as total_paid, max(p.payment_date) as last_payment_date
+        from invoices i join payments p on p.invoice_id=i.id
+        where i.deal_id is null and p.match_confidence!='flagged'
+        group by i.id,i.invoice_number,i.customer_name,i.source,i.invoice_date,i.gross_amount
+        order by i.invoice_date asc
+    ''')
+    if df.empty:
+        st.success('All paid invoices are linked to deals.')
+        return
+    st.info(f'{len(df)} paid invoices not yet linked.')
+    inv_options = {f"{r.invoice_number}  |  {r.customer_name}  |  {r.source}  |  {str(r.invoice_date)[:10]}  |  {float(r.gross_amount):,.2f}": r.invoice_id for r in df.itertuples()}
+    chosen_label = st.selectbox('Invoice', list(inv_options.keys()), label_visibility='collapsed')
+    chosen_inv_id = inv_options[chosen_label]
+    chosen_row = df[df['invoice_id']==chosen_inv_id].iloc[0]
+
+    st.divider()
+    col_a, col_b, col_c = st.columns(3)
+    with col_a:
+        st.markdown('**Invoice**')
+        st.write(f"Customer: {chosen_row['customer_name']}")
+        st.write(f"Date: {str(chosen_row['invoice_date'])[:10]}")
+        st.write(f"Gross: {float(chosen_row['gross_amount']):,.2f}")
+        st.write(f"Paid: {float(chosen_row['total_paid']):,.2f}")
+        st.write(f"Source: {chosen_row['source']}")
+        st.divider()
+        if st.button('Delete Invoice', type='secondary', key='del_inv2'):
+            with _engine().connect() as conn:
+                conn.execute(text('delete from payments where invoice_id=:i'), {'i': int(chosen_inv_id)})
+                conn.execute(text('delete from invoices where id=:i'), {'i': int(chosen_inv_id)})
+                conn.commit()
+            st.success('Deleted.')
+            st.rerun()
+    with col_b:
+        st.markdown('**Date Paid**')
+        pay_date = st.date_input('Date Paid', value=pd.to_datetime(chosen_row['last_payment_date']).date() if chosen_row['last_payment_date'] else date.today(), key='match_date2', label_visibility='collapsed')
+    with col_c:
+        st.markdown('**Link to Deal**')
+        search = st.text_input('Search deal name or rep', key='match_search2')
+        if search and len(search) >= 2:
+            deals = db_read("select id,deal_name,owner,deal_currency,close_date,close_quarter,invoice_total from deals where deal_name ilike :q or owner ilike :q order by close_date desc limit 50", {'q': f'%{search}%'})
+            if deals.empty:
+                st.warning('No deals found.')
+            else:
+                deal_options = {f"{r.deal_name} -- {r.owner} -- {str(r.close_date)[:10]}": r.id for r in deals.itertuples()}
+                chosen_deal_label = st.selectbox('Deal', list(deal_options.keys()), label_visibility='collapsed', key='match_deal2')
+                chosen_deal_id = deal_options[chosen_deal_label]
+                chosen_deal = deals[deals['id']==chosen_deal_id].iloc[0]
+                st.write(f"Owner: {chosen_deal['owner']}")
+                st.write(f"Quarter: {chosen_deal['close_quarter']}")
+                if st.button('Link', type='primary', key='link_btn2'):
+                    with _engine().connect() as conn:
+                        conn.execute(text('update invoices set deal_id=:did where id=:iid'), {'did': int(chosen_deal_id), 'iid': int(chosen_inv_id)})
+                        conn.execute(text('update payments set payment_date=:pd where invoice_id=:iid'), {'pd': str(pay_date), 'iid': int(chosen_inv_id)})
+                        conn.commit()
+                    st.success(f'Linked and date set to {pay_date}.')
+                    st.rerun()
+        else:
+            st.caption('Type at least 2 characters.')
+
+    st.divider()
+    st.subheader('Recently Linked')
+    recent = db_read('''select i.invoice_number, i.customer_name, i.source, i.gross_amount, d.deal_name, d.owner, d.close_date
+        from invoices i join deals d on d.id=i.deal_id where i.deal_id is not null order by i.last_imported desc limit 20''')
+    if not recent.empty:
+        st.dataframe(recent, hide_index=True, use_container_width=True)
+
+
+def _admin_quality():
+    st.subheader('Missing Booth Items')
+    df = db_read('''select d.owner, r.region, d.deal_currency, d.deal_name, d.close_date, d.invoice_total, d.paid_total
+        from deals d join reps r on r.name=d.owner where d.booth_missing=true order by r.region,d.owner,d.close_date desc''')
+    if df.empty:
+        st.success('No missing booth items.')
+    else:
+        st.warning(f'{len(df)} deals affected.')
+        st.dataframe(df, hide_index=True, use_container_width=True)
+        st.download_button('Download CSV', df.to_csv(index=False).encode(), 'missing_booth.csv', 'text/csv')
+
+    st.divider()
+    st.subheader('Paid Deals with No Payment Date')
+    df2 = db_read('''select d.owner, r.region, d.deal_name, d.deal_currency, d.close_date, d.paid_total
+        from deals d join reps r on r.name=d.owner
+        where d.hubspot_paid_date is null and d.paid_total>0
+          and not exists (select 1 from invoices i join payments p on p.invoice_id=i.id where i.deal_id=d.id)
+        order by r.region,d.owner''')
+    if df2.empty:
+        st.success('All paid deals have payment dates.')
+    else:
+        st.warning(f'{len(df2)} deals affected.')
+        st.dataframe(df2, hide_index=True, use_container_width=True)
+
+    st.divider()
+    st.subheader('QB Unmatched Payments')
+    df3 = db_read('''select p.id, p.source, p.payment_date, p.amount, i.customer_name
+        from payments p left join invoices i on i.id=p.invoice_id
+        where p.match_confidence='flagged' order by p.payment_date desc''')
+    if df3.empty:
+        st.success('No unmatched QB payments.')
+    else:
+        st.warning(f'{len(df3)} unmatched.')
+        st.dataframe(df3, hide_index=True, use_container_width=True)
+
+
+# ================================================================
 # section 7: main app
 # ================================================================
 
@@ -1710,28 +2171,13 @@ with st.sidebar:
     st.caption('Commission Calculator')
     st.divider()
 
-    page = st.radio('Navigation', [
-        'Dashboard',
-        'Monthly Payout',
-        'Payout History',
-        'Quarterly Review',
-        'Payouts',
-        'Match Payments',
-        'Data Quality',
-        'Import',
-    ])
+    page = st.radio('Navigation', ['Home', 'Payouts', 'Admin'])
 
     st.divider()
     st.markdown('**Period**')
     months = pd.date_range('2025-01-01', date.today(), freq='MS').strftime('%Y-%m').tolist()[::-1]
-    month_options = ['All Time'] + months
-    selected_month = st.selectbox('Month', month_options, label_visibility='collapsed', key='month_sel')
-
-    if selected_month == 'All Time':
-        period_filter = None
-    else:
-        period_filter = (f'{selected_month}-01', f'{selected_month}-31')
-
+    selected_month = st.selectbox('Month', ['All Time'] + months, label_visibility='collapsed', key='month_sel')
+    period_filter = None if selected_month == 'All Time' else (f'{selected_month}-01', f'{selected_month}-31')
     st.session_state.period_filter = period_filter
 
     st.divider()
@@ -1743,12 +2189,29 @@ with st.sidebar:
             fx[ccy] = st.number_input(ccy, value=default, step=0.01, format='%.4f', key=f'fx_{ccy}')
         st.session_state.fx = fx
 
-match page:
-    case 'Dashboard':        page_dashboard()
-    case 'Monthly Payout':   page_monthly_payout()
-    case 'Payout History':   page_payout_history()
-    case 'Quarterly Review': page_quarterly_review()
-    case 'Data Quality':     page_data_quality()
-    case 'Payouts':          page_payouts()
-    case 'Match Payments':   page_match()
-    case 'Import':           page_import()
+if page == 'Home':
+    page_dashboard()
+
+elif page == 'Payouts':
+    st.title('Payouts')
+    tab1, tab2, tab3, tab4 = st.tabs(['Monthly Commission', 'Rep Drill-Down', 'Log Payouts', 'Payout History'])
+
+    with tab1:
+        _payouts_monthly()
+    with tab2:
+        _payouts_drilldown()
+    with tab3:
+        _payouts_log()
+    with tab4:
+        _payouts_history()
+
+elif page == 'Admin':
+    st.title('Admin')
+    tab1, tab2, tab3 = st.tabs(['Import & Calculate', 'Match Payments', 'Data Quality'])
+
+    with tab1:
+        _admin_import()
+    with tab2:
+        _admin_match()
+    with tab3:
+        _admin_quality()
