@@ -1051,10 +1051,15 @@ def page_dashboard():
         st.info('No commission data. Import files and run Calculate.')
 
     st.divider()
-    st.subheader('Rep Attainment This Quarter')
+    st.subheader('Rep Attainment')
 
     current_q = f'{date.today().year} Q{(date.today().month-1)//3+1}'
-    rep_sel = st.selectbox('Select Rep', [''] + sorted(REPS.keys()), label_visibility='collapsed', key='dash_rep')
+    all_quarters = db_read("select distinct close_quarter from attainment where close_quarter is not null order by close_quarter desc")
+    q_options = all_quarters['close_quarter'].tolist() if not all_quarters.empty else [current_q]
+
+    att_col1, att_col2 = st.columns(2)
+    rep_sel  = att_col1.selectbox('Rep', [''] + sorted(REPS.keys()), label_visibility='collapsed', key='dash_rep')
+    sel_q    = att_col2.selectbox('Quarter', q_options, label_visibility='collapsed', key='dash_q')
 
     if rep_sel:
         cfg  = REPS[rep_sel]
@@ -1062,10 +1067,10 @@ def page_dashboard():
         att = db_read(
             'select total_booth_items, tier_name, tier_rate, deal_count from attainment '
             'where rep_name=:n and close_quarter=:q',
-            {'n': rep_sel, 'q': current_q}
+            {'n': rep_sel, 'q': sel_q}
         )
         if att.empty:
-            st.info(f'No attainment data for {rep_sel} in {current_q} yet.')
+            st.info(f'No attainment data for {rep_sel} in {sel_q} yet.')
         elif not tiers:
             st.info(f'{rep_sel} does not have an accelerator tier.')
         else:
@@ -1081,7 +1086,7 @@ def page_dashboard():
             steps.append({'range': [prev, max_v], 'color': '#0d3b75'})
             fig = go.Figure(go.Indicator(
                 mode='gauge+number', value=total,
-                title={'text': f'{rep_sel} -- {current_q}', 'font': {'size': 14}},
+                title={'text': f'{rep_sel} -- {sel_q}', 'font': {'size': 14}},
                 number={'prefix': sym, 'valueformat': ',.0f'},
                 gauge={'axis': {'range': [0, max_v]}, 'bar': {'color': '#e8622a'},
                        'steps': steps,
@@ -1758,19 +1763,52 @@ def page_payouts():
 # ================================================================
 
 def _payouts_monthly():
-    period = st.session_state.get('period_filter')
-    pc, pp = _period_clause(period)
+    # month selector -- overrides sidebar period for this tab
+    months_avail = db_read("select distinct period from commission_lines where period >= '2025-01' order by period desc")
+    if months_avail.empty:
+        st.info('No commission data yet.')
+        return
+    month_list = months_avail['period'].tolist()
+    sel_month = st.selectbox('Month', month_list, label_visibility='collapsed', key='monthly_month')
+    pc  = 'and cl.payment_date between :p0 and :p1'
+    pp  = {'p0': f'{sel_month}-01', 'p1': f'{sel_month}-31'}
+
+    # check if this is a quarter-end month (March=Q1, June=Q2, Sep=Q3, Dec=Q4)
+    mo = int(sel_month[5:7])
+    is_quarter_end = mo in (3, 6, 9, 12)
+    quarter_label = None
+    if is_quarter_end:
+        yr = sel_month[:4]
+        qn = {3:'Q1', 6:'Q2', 9:'Q3', 12:'Q4'}[mo]
+        quarter_label = f'{yr} {qn}'
+
     df = db_read(
         f'select d.owner, r.region, r.currency, r.level, '
         f'sum(cl.commission) as commission, sum(cl.accelerator) as accelerator, sum(cl.payout) as payout '
         f'from commission_lines cl join deals d on d.id=cl.deal_id join reps r on r.name=d.owner '
         f'where 1=1 {pc} group by d.owner,r.region,r.currency,r.level order by r.region,d.owner', pp)
+
+    # quarterly accelerator total for quarter-end months
+    q_accel = {}
+    if is_quarter_end and quarter_label:
+        qa = db_read(
+            'select d.owner, sum(cl.accelerator) as q_accelerator '
+            'from commission_lines cl join deals d on d.id=cl.deal_id '
+            'where cl.close_quarter=:q group by d.owner',
+            {'q': quarter_label}
+        )
+        if not qa.empty:
+            q_accel = dict(zip(qa['owner'], qa['q_accelerator']))
+
     if df.empty:
-        st.info('No commission data for the selected period.')
+        st.info('No commission data for this month.')
         return
     missing = _scalar('select count(*) from deals where booth_missing=true', {})
     if missing:
         st.warning(f'{int(missing)} deals are missing Booth Items revenue and are excluded.')
+    if is_quarter_end and quarter_label:
+        st.info(f'Quarter-end month -- Quarterly Bonus column shows total accelerator earned in {quarter_label}.')
+
     regions = df['region'].unique().tolist()
     tabs = st.tabs(regions + ['All'])
     for i, region in enumerate(regions):
@@ -1779,12 +1817,20 @@ def _payouts_monthly():
             sym = CCY_SYM.get(sub.iloc[0]['currency'], '$')
             disp = sub[['owner','level','currency','commission','accelerator','payout']].copy()
             disp.columns = ['Rep','Level','Currency','Commission','Accelerator','Total Payout']
+            if is_quarter_end and q_accel:
+                disp['Quarterly Bonus'] = disp['Rep'].map(lambda r: f'{sym}{float(q_accel.get(r,0)):,.2f}')
             for c in ['Commission','Accelerator','Total Payout']:
-                disp[c] = disp[c].apply(lambda x: f'{sym}{x:,.2f}')
-            total_row = pd.DataFrame([{'Rep':'TOTAL','Level':'','Currency':'','Commission':'','Accelerator':'','Total Payout':f'{sym}{sub["payout"].sum():,.2f}'}])
+                disp[c] = disp[c].apply(lambda x: f'{sym}{float(x):,.2f}')
+            total_row_data = {'Rep':'TOTAL','Level':'','Currency':'','Commission':'','Accelerator':'','Total Payout':f'{sym}{sub["payout"].sum():,.2f}'}
+            if is_quarter_end and q_accel:
+                total_row_data['Quarterly Bonus'] = f'{sym}{sum(float(q_accel.get(r,0)) for r in sub["owner"]):,.2f}'
+            total_row = pd.DataFrame([total_row_data])
             st.dataframe(pd.concat([disp, total_row], ignore_index=True), hide_index=True, use_container_width=True)
     with tabs[-1]:
-        st.dataframe(df[['owner','region','level','currency','commission','accelerator','payout']], hide_index=True, use_container_width=True)
+        all_disp = df[['owner','region','level','currency','commission','accelerator','payout']].copy()
+        if is_quarter_end and q_accel:
+            all_disp['q_bonus'] = all_disp['owner'].map(lambda r: float(q_accel.get(r,0)))
+        st.dataframe(all_disp, hide_index=True, use_container_width=True)
 
 
 def _payouts_drilldown():
@@ -2175,9 +2221,16 @@ with st.sidebar:
 
     st.divider()
     st.markdown('**Period**')
+    st.caption('Filters all commission data.')
     months = pd.date_range('2025-01-01', date.today(), freq='MS').strftime('%Y-%m').tolist()[::-1]
     selected_month = st.selectbox('Month', ['All Time'] + months, label_visibility='collapsed', key='month_sel')
-    period_filter = None if selected_month == 'All Time' else (f'{selected_month}-01', f'{selected_month}-31')
+    if selected_month == 'All Time':
+        period_filter = None
+    else:
+        import calendar as _cal
+        yr, mo = int(selected_month[:4]), int(selected_month[5:7])
+        last_day = _cal.monthrange(yr, mo)[1]
+        period_filter = (f'{selected_month}-01', f'{selected_month}-{last_day}')
     st.session_state.period_filter = period_filter
 
     st.divider()
