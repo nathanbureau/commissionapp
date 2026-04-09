@@ -1388,7 +1388,7 @@ def page_data_quality():
 
 def page_match():
     st.title('Match Payments to Deals')
-    st.caption('Invoices that have received payments but are not linked to a deal. Link them here -- the next Calculate will pick them up.')
+    st.caption('Paid invoices with no deal attached. Select one, assign a rep and payment date, then link it to a deal.')
 
     df = db_read('''
         select
@@ -1399,14 +1399,13 @@ def page_match():
             i.invoice_date,
             i.gross_amount,
             sum(p.amount) as total_paid,
-            max(p.payment_date) as last_payment_date,
-            count(p.id) as payment_count
+            max(p.payment_date) as last_payment_date
         from invoices i
         join payments p on p.invoice_id = i.id
         where i.deal_id is null
           and p.match_confidence != 'flagged'
         group by i.id, i.invoice_number, i.customer_name, i.source, i.invoice_date, i.gross_amount
-        order by last_payment_date desc
+        order by i.invoice_date asc
     ''')
 
     if df.empty:
@@ -1415,72 +1414,78 @@ def page_match():
 
     st.info(f'{len(df)} paid invoices not yet linked to a deal.')
 
+    # invoice list
+    inv_options = {
+        f"{r.invoice_number}  |  {r.customer_name}  |  {r.source}  |  {str(r.invoice_date)[:10]}  |  {float(r.gross_amount):,.2f}": r.invoice_id
+        for r in df.itertuples()
+    }
+    chosen_label = st.selectbox('Invoice', list(inv_options.keys()), label_visibility='collapsed')
+    chosen_inv_id = inv_options[chosen_label]
+    chosen_row = df[df['invoice_id'] == chosen_inv_id].iloc[0]
+
     st.divider()
+    col_a, col_b, col_c = st.columns([1, 1, 1])
 
-    col_l, col_r = st.columns([1, 1])
+    with col_a:
+        st.markdown('**Invoice Details**')
+        st.write(f"Customer: {chosen_row['customer_name']}")
+        st.write(f"Invoice Date: {str(chosen_row['invoice_date'])[:10]}")
+        st.write(f"Gross: {float(chosen_row['gross_amount']):,.2f}")
+        st.write(f"Paid: {float(chosen_row['total_paid']):,.2f}")
+        st.write(f"Source: {chosen_row['source']}")
 
-    with col_l:
-        st.subheader('Select Invoice')
-        inv_options = {
-            f"{r.invoice_number} -- {r.customer_name} ({r.source}) -- {CCY_SYM.get('USD','$')}{r.gross_amount:,.2f}": r.invoice_id
-            for r in df.itertuples()
-        }
-        chosen_inv_label = st.selectbox('Invoice', list(inv_options.keys()), label_visibility='collapsed')
-        chosen_inv_id = inv_options[chosen_inv_label]
+        st.divider()
+        if st.button('Delete Invoice', type='secondary', key='del_inv'):
+            with _engine().connect() as conn:
+                conn.execute(text('delete from payments where invoice_id=:i'), {'i': int(chosen_inv_id)})
+                conn.execute(text('delete from invoices where id=:i'), {'i': int(chosen_inv_id)})
+                conn.commit()
+            st.success('Invoice deleted.')
+            st.rerun()
 
-        chosen_row = df[df['invoice_id'] == chosen_inv_id].iloc[0]
-        st.markdown(f"**Customer:** {chosen_row['customer_name']}")
-        st.markdown(f"**Invoice Date:** {chosen_row['invoice_date']}")
-        st.markdown(f"**Gross Amount:** {chosen_row['gross_amount']:,.2f}")
-        st.markdown(f"**Total Paid:** {chosen_row['total_paid']:,.2f}")
-        st.markdown(f"**Last Payment:** {chosen_row['last_payment_date']}")
-        st.markdown(f"**Source:** {chosen_row['source']}")
+    with col_b:
+        st.markdown('**Assign')
+        rep_sel = st.selectbox('Rep', sorted(REPS.keys()), key='match_rep')
+        pay_date = st.date_input('Date Paid', value=pd.to_datetime(chosen_row['last_payment_date']).date() if chosen_row['last_payment_date'] else date.today(), key='match_date')
 
-    with col_r:
-        st.subheader('Find Deal')
-        search = st.text_input('Search deal name or owner', key='match_search')
-
+    with col_c:
+        st.markdown('**Link to Deal**')
+        search = st.text_input('Search deal name', key='match_search')
         if search and len(search) >= 2:
             deals = db_read(
                 "select id, deal_name, owner, deal_currency, close_date, close_quarter, invoice_total "
-                "from deals where deal_name ilike :q or owner ilike :q order by close_date desc limit 50",
+                "from deals where (deal_name ilike :q or owner ilike :q) order by close_date desc limit 50",
                 {'q': f'%{search}%'}
             )
             if deals.empty:
                 st.warning('No deals found.')
             else:
-                deal_options = {
-                    f"{r.deal_name} -- {r.owner} -- {r.close_date}": r.id
-                    for r in deals.itertuples()
-                }
-                chosen_deal_label = st.selectbox('Deal', list(deal_options.keys()), label_visibility='collapsed')
+                deal_options = {f"{r.deal_name} -- {r.owner} -- {str(r.close_date)[:10]}": r.id for r in deals.itertuples()}
+                chosen_deal_label = st.selectbox('Deal', list(deal_options.keys()), label_visibility='collapsed', key='match_deal')
                 chosen_deal_id = deal_options[chosen_deal_label]
-
                 chosen_deal = deals[deals['id'] == chosen_deal_id].iloc[0]
-                st.markdown(f"**Owner:** {chosen_deal['owner']}")
-                st.markdown(f"**Currency:** {chosen_deal['deal_currency']}")
-                st.markdown(f"**Close Date:** {chosen_deal['close_date']}")
-                st.markdown(f"**Quarter:** {chosen_deal['close_quarter']}")
-                st.markdown(f"**Invoice Total:** {chosen_deal['invoice_total']:,.2f}" if chosen_deal['invoice_total'] else "**Invoice Total:** --")
+                st.write(f"Owner: {chosen_deal['owner']}")
+                st.write(f"Quarter: {chosen_deal['close_quarter']}")
 
-                st.divider()
-                if st.button('Link Invoice to Deal', type='primary'):
+                if st.button('Link Invoice to Deal', type='primary', key='link_btn'):
                     with _engine().connect() as conn:
+                        conn.execute(text('update invoices set deal_id=:did where id=:iid'),
+                                     {'did': int(chosen_deal_id), 'iid': int(chosen_inv_id)})
                         conn.execute(text(
-                            'update invoices set deal_id=:did where id=:iid'
-                        ), {'did': int(chosen_deal_id), 'iid': int(chosen_inv_id)})
+                            'update payments set payment_date=:pd where invoice_id=:iid'
+                        ), {'pd': str(pay_date), 'iid': int(chosen_inv_id)})
                         conn.commit()
-                    st.success(f'Linked {chosen_row["invoice_number"]} to {chosen_deal["deal_name"]}.')
+                    st.success(f'Linked and payment date set to {pay_date}.')
                     st.rerun()
         else:
-            st.caption('Type at least 2 characters to search.')
+            st.caption('Type at least 2 characters.')
 
     st.divider()
     st.subheader('Recently Linked')
     recent = db_read('''
         select i.invoice_number, i.customer_name, i.source, i.gross_amount,
                d.deal_name, d.owner, d.close_date
-        from invoices i join deals d on d.id = i.deal_id
+        from invoices i join deals d on d.id=i.deal_id
         where i.deal_id is not null
         order by i.last_imported desc limit 20
     ''')
@@ -1632,6 +1637,61 @@ def page_payouts():
     else:
         st.info('No payout history yet.')
 
+    st.divider()
+    st.subheader('Quarterly Bonus Payments')
+    st.caption(
+        'The quarterly accelerator is earned based on booth items closed in a quarter, '
+        'but paid out as cash lands deal-by-deal throughout the following months. '
+        'Use this section to record a lump-sum bonus payment made at quarter end if you pay it separately.'
+    )
+
+    qs_list = db_read(
+        "select distinct close_quarter from attainment where close_quarter is not null order by close_quarter desc"
+    )
+    if not qs_list.empty:
+        qbonus_rep  = st.selectbox('Rep', sorted(REPS.keys()), key='qb_rep')
+        qbonus_q    = st.selectbox('Quarter', qs_list['close_quarter'].tolist(), key='qb_q')
+        qbonus_date = st.date_input('Date Paid', value=date.today(), key='qb_date')
+        qbonus_amt  = st.number_input(
+            f'Amount ({REPS[qbonus_rep]["currency"]})',
+            min_value=0.0, step=0.01, format='%.2f', key='qb_amt'
+        )
+        qbonus_note = st.text_input('Notes (optional)', key='qb_note')
+
+        if st.button('Save Quarterly Bonus', key='qb_save'):
+            if qbonus_amt <= 0:
+                st.error('Amount must be greater than zero.')
+            else:
+                ccy = REPS[qbonus_rep]['currency']
+                with _engine().connect() as conn:
+                    conn.execute(text(
+                        'insert into payouts (rep_name, period_from, period_to, amount, currency, notes) '
+                        'values (:rep, :pf, :pt, :amt, :ccy, :notes)'
+                    ), {
+                        'rep': qbonus_rep,
+                        'pf':  str(qbonus_date),
+                        'pt':  str(qbonus_date),
+                        'amt': qbonus_amt,
+                        'ccy': ccy,
+                        'notes': f'Q bonus {qbonus_q}' + (f' -- {qbonus_note}' if qbonus_note else ''),
+                    })
+                    conn.commit()
+                st.success(f'Saved quarterly bonus for {qbonus_rep} -- {qbonus_q}.')
+                st.rerun()
+
+        # show existing quarterly bonus payments
+        qb_hist = db_read(
+            "select rep_name, period_from, amount, currency, notes, created_at "
+            "from payouts where notes ilike '%Q bonus%' order by period_from desc limit 30"
+        )
+        if not qb_hist.empty:
+            qb_hist['amount'] = qb_hist.apply(
+                lambda r: f'{CCY_SYM.get(r["currency"],"$")}{float(r["amount"]):,.2f}', axis=1
+            )
+            qb_hist['created_at'] = qb_hist['created_at'].astype(str).str[:16]
+            qb_hist.columns = ['Rep', 'Date Paid', 'Amount', 'Currency', 'Notes', 'Logged At']
+            st.dataframe(qb_hist, hide_index=True, use_container_width=True)
+
 # ================================================================
 # section 7: main app
 # ================================================================
@@ -1650,37 +1710,32 @@ with st.sidebar:
     st.caption('Commission Calculator')
     st.divider()
 
-    page = st.radio('', ['Dashboard','Monthly Payout','Payout History','Quarterly Review','Data Quality','Payouts','Match Payments','Import'],
-                    label_visibility='collapsed')
+    page = st.radio('Navigation', [
+        'Dashboard',
+        'Monthly Payout',
+        'Payout History',
+        'Quarterly Review',
+        'Payouts',
+        'Match Payments',
+        'Data Quality',
+        'Import',
+    ])
 
     st.divider()
-    st.markdown('**Payment Period**')
-    mode = st.selectbox('', ['All Dates','Month','Quarter','Date Range'], label_visibility='collapsed')
+    st.markdown('**Period**')
+    months = pd.date_range('2025-01-01', date.today(), freq='MS').strftime('%Y-%m').tolist()[::-1]
+    month_options = ['All Time'] + months
+    selected_month = st.selectbox('Month', month_options, label_visibility='collapsed', key='month_sel')
 
-    period_filter = None
-    if mode == 'Month':
-        months = pd.date_range('2025-01-01', date.today(), freq='MS').strftime('%Y-%m').tolist()[::-1]
-        m = st.selectbox('', months, label_visibility='collapsed', key='m_sel')
-        if m:
-            period_filter = (f'{m}-01', f'{m}-31')
-    elif mode == 'Quarter':
-        qs = [f'{y} Q{q}' for y in range(2025, date.today().year + 2) for q in range(1, 5)
-              if f'{y} Q{q}' <= f'{date.today().year} Q{(date.today().month-1)//3+1}'][::-1]
-        q = st.selectbox('', qs, label_visibility='collapsed', key='q_sel')
-        if q:
-            yr, qn = q.split(' Q')
-            s = {'1':'01-01','2':'04-01','3':'07-01','4':'10-01'}
-            e = {'1':'03-31','2':'06-30','3':'09-30','4':'12-31'}
-            period_filter = (f'{yr}-{s[qn]}', f'{yr}-{e[qn]}')
-    elif mode == 'Date Range':
-        d1 = st.date_input('From', date.today() - timedelta(days=30), label_visibility='collapsed')
-        d2 = st.date_input('To',   date.today(), label_visibility='collapsed')
-        period_filter = (str(d1), str(d2))
+    if selected_month == 'All Time':
+        period_filter = None
+    else:
+        period_filter = (f'{selected_month}-01', f'{selected_month}-31')
 
     st.session_state.period_filter = period_filter
 
     st.divider()
-    with st.expander('Exchange Rates (USD base)'):
+    with st.expander('FX Rates (USD base)'):
         fx = {'USD': 1.0}
         for ccy, default in DEFAULT_FX.items():
             if ccy == 'USD':
