@@ -1191,6 +1191,7 @@ def page_payout_history():
         select d.owner, r.region, r.currency, cl.period, cl.close_quarter,
                cl.commission, cl.accelerator, cl.payout
         from commission_lines cl join deals d on d.id=cl.deal_id join reps r on r.name=d.owner
+        where cl.period >= '2025-01'
         order by cl.period
     ''')
 
@@ -1493,7 +1494,7 @@ def page_payouts():
 
     region_filter = st.selectbox('Region', ['All'] + sorted(set(r['region'] for r in REPS.values())), key='po_region')
 
-    periods = db_read("select distinct period from commission_lines order by period desc")
+    periods = db_read("select distinct period from commission_lines where period >= '2025-01' order by period desc")
     if periods.empty:
         st.info('No commission data yet. Import files and run Calculate.')
         return
@@ -1658,12 +1659,12 @@ with st.sidebar:
 
     period_filter = None
     if mode == 'Month':
-        months = pd.date_range('2023-01-01', date.today(), freq='MS').strftime('%Y-%m').tolist()[::-1]
+        months = pd.date_range('2025-01-01', date.today(), freq='MS').strftime('%Y-%m').tolist()[::-1]
         m = st.selectbox('', months, label_visibility='collapsed', key='m_sel')
         if m:
             period_filter = (f'{m}-01', f'{m}-31')
     elif mode == 'Quarter':
-        qs = [f'{y} Q{q}' for y in range(2023, date.today().year + 2) for q in range(1, 5)
+        qs = [f'{y} Q{q}' for y in range(2025, date.today().year + 2) for q in range(1, 5)
               if f'{y} Q{q}' <= f'{date.today().year} Q{(date.today().month-1)//3+1}'][::-1]
         q = st.selectbox('', qs, label_visibility='collapsed', key='q_sel')
         if q:
