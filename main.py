@@ -174,15 +174,13 @@ DEFAULT_FX  = {'USD': 1.0, 'CAD': 0.74, 'AUD': 0.65, 'GBP': 1.26, 'EUR': 1.08}
 CCY_SYM     = {'USD': '$', 'CAD': 'C$', 'AUD': 'A$', 'GBP': '£', 'EUR': '€'}
 WELCOMES = [
     "Teya! The legend has logged in. Let's get this bread.",
-    "Welcome back, Teya. Everyone here thinks you're doing an incredible job.",
+    "Welcome back, Teya. Everyone thinks you're doing an incredible job.",
     "Oh thank god you're here Teya, we were lost without you.",
-    "Teya in the building. Commissions fear her.",
-    "Hello gorgeous. Ready to make some reps very happy?",
+    "Teya in the building. Recievable Accounts fear her.",
     "Teya! The spreadsheet whisperer returns. They wrote songs about you, you know.",
     "Back again, Teya? You really do run this place.",
-    "Welcome, Teya. HR wants you to know you're their favourite.",
     "Teya has entered the chat. Chaos has left the building.",
-    "Good to have you back. No one does this better than you, genuinely.",
+    "Good to have you back. No one does this better than you.",
 ]
 
 
