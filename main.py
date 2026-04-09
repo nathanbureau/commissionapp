@@ -1770,8 +1770,11 @@ def _payouts_monthly():
         return
     month_list = months_avail['period'].tolist()
     sel_month = st.selectbox('Month', month_list, label_visibility='collapsed', key='monthly_month')
+    import calendar as _mcal
+    _myr, _mmo = int(sel_month[:4]), int(sel_month[5:7])
+    _last = _mcal.monthrange(_myr, _mmo)[1]
     pc  = 'and cl.payment_date between :p0 and :p1'
-    pp  = {'p0': f'{sel_month}-01', 'p1': f'{sel_month}-31'}
+    pp  = {'p0': f'{sel_month}-01', 'p1': f'{sel_month}-{_last}'}
 
     # check if this is a quarter-end month (March=Q1, June=Q2, Sep=Q3, Dec=Q4)
     mo = int(sel_month[5:7])
